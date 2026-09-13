@@ -339,7 +339,28 @@ jobs:
       # ========================================================
       # BUILD NFQWS
       # ========================================================
+      - name: Install required system headers
+        shell: bash
+        run: |
+          set -eux
 
+          DEPS="$GITHUB_WORKSPACE/deps"
+
+          mkdir -p "$DEPS/include/sys"
+
+          install -Dm644 \
+            /usr/include/x86_64-linux-gnu/sys/queue.h \
+            "$DEPS/include/sys/queue.h"
+
+          install -Dm644 \
+            /usr/include/sys/capability.h \
+            "$DEPS/include/sys/capability.h"
+
+          test -f "$DEPS/include/sys/queue.h"
+          test -f "$DEPS/include/sys/capability.h"
+
+          echo "queue.h OK"
+          echo "capability.h OK"
       - name: Build patched nfqws
         shell: bash
         run: |
