@@ -28,7 +28,8 @@ jobs:
             "$GITHUB_WORKSPACE/zapret-v72.13.tar.gz" \
             -C "$GITHUB_WORKSPACE/src"
 
-          test -d "$GITHUB_WORKSPACE/src/zapret-72.13"
+          test -d \
+            "$GITHUB_WORKSPACE/src/zapret-72.13"
 
           mv \
             "$GITHUB_WORKSPACE/src/zapret-72.13" \
@@ -37,10 +38,7 @@ jobs:
           test -f \
             "$GITHUB_WORKSPACE/zapret/nfq/nfqws.c"
 
-          echo "============================================================"
-          echo " OFFICIAL ZAPRET v72.13 SOURCE"
-          echo "============================================================"
-
+          echo "===== SOURCE READY ====="
           ls -lh \
             "$GITHUB_WORKSPACE/zapret/nfq/nfqws.c"
 
@@ -71,14 +69,11 @@ jobs:
                   "ERROR: nfq_unbind_pf(*h, AF_INET) not found"
               )
 
-          print("============================================================")
-          print(" ORIGINAL NFQ CODE")
-          print("============================================================")
-
+          print("===== ORIGINAL CODE =====")
           print(
               s[
-                  max(0, pos - 300):
-                  min(len(s), pos + 800)
+                  max(0, pos - 350):
+                  min(len(s), pos + 750)
               ]
           )
 
@@ -86,7 +81,8 @@ jobs:
               r'''
               (?P<indent>[ \t]*)
               if\s*\(
-              \s*nfq_unbind_pf\(\*h,\s*AF_INET\)\s*<\s*0
+              \s*nfq_unbind_pf\(\*h,\s*AF_INET\)
+              \s*<\s*0
               \s*\)
               \s*\{
               \s*DLOG_PERROR\("nfq_unbind_pf\(\)"\)\s*;
@@ -107,58 +103,52 @@ jobs:
 
           replacement = (
               f'{indent}if (nfq_unbind_pf(*h, AF_INET) < 0) {{\n'
-              f'{indent}\tif (errno == EINVAL) {{\n'
-              f'{indent}\t\tDLOG("nfq_unbind_pf(): EINVAL, ignoring for old kernel\\n");\n'
-              f'{indent}\t}} else {{\n'
-              f'{indent}\t\tDLOG_PERROR("nfq_unbind_pf()");\n'
-              f'{indent}\t\tgoto exiterr;\n'
-              f'{indent}\t}}\n'
+              f'{indent}    if (errno == EINVAL) {{\n'
+              f'{indent}        DLOG("nfq_unbind_pf(): EINVAL, ignoring for old kernel\\n");\n'
+              f'{indent}    }} else {{\n'
+              f'{indent}        DLOG_PERROR("nfq_unbind_pf()");\n'
+              f'{indent}        goto exiterr;\n'
+              f'{indent}    }}\n'
               f'{indent}}}'
           )
 
-          s = (
-              s[:m.start()]
-              + replacement
-              + s[m.end():]
-          )
+          s2 = s[:m.start()] + replacement + s[m.end():]
 
-          p.write_text(s)
+          p.write_text(s2)
 
-          print("")
-          print("============================================================")
-          print(" PATCH APPLIED")
-          print("============================================================")
+          print("===== PATCH APPLIED =====")
 
-          pos2 = s.find(needle)
+          pos2 = s2.find(needle)
 
           print(
-              s[
+              s2[
                   max(0, pos2 - 250):
-                  min(len(s), pos2 + 850)
+                  min(len(s2), pos2 + 800)
               ]
           )
           PY
 
       # ========================================================
-      # BUILD TOOLS
+      # TOOLCHAIN
       # ========================================================
 
-      - name: Set up build tools
+      - name: Install ARM toolchain
         shell: bash
         run: |
           set -eux
 
-          sudo apt update -qq
-          sudo apt install -y libcap-dev
+          sudo apt-get update -qq
+          sudo apt-get install -y libcap-dev
 
-          TOOL=armv6-unknown-linux-musleabi
-
-          URL="https://github.com/bol-van/musl-cross/releases/download/latest/${TOOL}.tar.xz"
+          TOOL="armv6-unknown-linux-musleabi"
 
           mkdir -p "$HOME/tools"
 
-          wget -qO- "$URL" \
-            | tar -C "$HOME/tools" -xJ
+          wget -qO- \
+            "https://github.com/bol-van/musl-cross/releases/download/latest/${TOOL}.tar.xz" \
+            | tar \
+              -C "$HOME/tools" \
+              -xJ
 
           test -x \
             "$HOME/tools/$TOOL/bin/$TOOL-gcc"
@@ -167,144 +157,283 @@ jobs:
             "$HOME/tools/$TOOL/bin" \
             >> "$GITHUB_PATH"
 
-          echo "============================================================"
-          echo " TOOLCHAIN"
-          echo "============================================================"
-
           "$HOME/tools/$TOOL/bin/$TOOL-gcc" \
             --version
 
       # ========================================================
-      # OFFICIAL-STYLE BUILD
+      # DEPENDENCIES
       # ========================================================
 
-      - name: Build zapret ARM
+      - name: Build ARM dependencies
         shell: bash
-        env:
-          ARCH: arm
-          TARGET: armv6-unknown-linux-musleabi
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
 
           DEPS_DIR="$GITHUB_WORKSPACE/deps"
+          TARGET="armv6-unknown-linux-musleabi"
+          CPU="-mcpu=arm1176jzf-s -mthumb"
+          OPTIMIZE="-Oz"
 
           export CC="$TARGET-gcc"
-          export LD="$TARGET-ld"
           export AR="$TARGET-ar"
+          export LD="$TARGET-ld"
           export NM="$TARGET-nm"
           export STRIP="$TARGET-strip"
 
+          mkdir -p \
+            "$DEPS_DIR/include" \
+            "$DEPS_DIR/lib" \
+            "$DEPS_DIR/lib/pkgconfig"
+
           export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig"
-          export STAGING_DIR="$RUNNER_TEMP"
-
-          OPTIMIZE=-Oz
-          CPU="-mcpu=arm1176jzf-s -mthumb"
-
-          mkdir -p "$DEPS_DIR"
 
           echo "============================================================"
-          echo " BUILD SETTINGS"
+          echo " BUILD ARM DEPENDENCIES"
           echo "============================================================"
-
-          echo "ARCH=$ARCH"
-          echo "TARGET=$TARGET"
-          echo "CPU=$CPU"
-          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
 
           # ------------------------------------------------------
-          # NETFILTER LIBRARIES
-          # This follows the official v72.13 build order.
+          # libmnl FIRST
           # ------------------------------------------------------
 
           echo ""
-          echo "============================================================"
-          echo " DOWNLOAD NETFILTER LIBRARIES"
-          echo "============================================================"
-
-          wget -qO- \
-            "https://www.netfilter.org/pub/libnfnetlink/libnfnetlink-1.0.2.tar.bz2" \
-            | tar -xj
+          echo "===== libmnl 1.0.5 ====="
 
           wget -qO- \
             "https://www.netfilter.org/pub/libmnl/libmnl-1.0.5.tar.bz2" \
             | tar -xj
 
+          (
+            cd libmnl-1.0.5
+
+            CFLAGS="$OPTIMIZE $CPU -flto=auto" \
+              ./configure \
+                --prefix= \
+                --host="$TARGET" \
+                --enable-static \
+                --disable-shared \
+                --disable-dependency-tracking
+
+            make install \
+              -j"$(nproc)" \
+              DESTDIR="$DEPS_DIR"
+          )
+
+          sed -i \
+            "s|^prefix=.*|prefix=$DEPS_DIR|g" \
+            "$DEPS_DIR/lib/pkgconfig/libmnl.pc"
+
+          test -f \
+            "$DEPS_DIR/lib/libmnl.a"
+
+          # ------------------------------------------------------
+          # libnfnetlink SECOND
+          # ------------------------------------------------------
+
+          echo ""
+          echo "===== libnfnetlink 1.0.2 ====="
+
+          wget -qO- \
+            "https://www.netfilter.org/pub/libnfnetlink/libnfnetlink-1.0.2.tar.bz2" \
+            | tar -xj
+
+          (
+            cd libnfnetlink-1.0.2
+
+            CFLAGS="$OPTIMIZE $CPU -flto=auto" \
+              ./configure \
+                --prefix= \
+                --host="$TARGET" \
+                --enable-static \
+                --disable-shared \
+                --disable-dependency-tracking
+
+            make install \
+              -j"$(nproc)" \
+              DESTDIR="$DEPS_DIR"
+          )
+
+          sed -i \
+            "s|^prefix=.*|prefix=$DEPS_DIR|g" \
+            "$DEPS_DIR/lib/pkgconfig/libnfnetlink.pc"
+
+          test -f \
+            "$DEPS_DIR/lib/libnfnetlink.a"
+
+          # ------------------------------------------------------
+          # Show what was actually installed
+          # ------------------------------------------------------
+
+          echo ""
+          echo "===== DEPENDENCY FILES ====="
+
+          find \
+            "$DEPS_DIR/lib/pkgconfig" \
+            -maxdepth 1 \
+            -type f \
+            -print
+
+          echo ""
+          echo "===== libnfnetlink.pc ====="
+          cat \
+            "$DEPS_DIR/lib/pkgconfig/libnfnetlink.pc"
+
+          echo ""
+          echo "===== libmnl.pc ====="
+          cat \
+            "$DEPS_DIR/lib/pkgconfig/libmnl.pc"
+
+          # ------------------------------------------------------
+          # LOCAL PKG-CONFIG WRAPPER
+          # ------------------------------------------------------
+          #
+          # libnetfilter_queue's configure asks pkg-config about
+          # libnfnetlink/libmnl.  We provide exact ARM paths.
+          #
+
+          echo ""
+          echo "===== CREATE LOCAL PKG-CONFIG WRAPPER ====="
+
+          mkdir -p \
+            "$GITHUB_WORKSPACE/tools"
+
+          cat > \
+            "$GITHUB_WORKSPACE/tools/e5186-pkg-config" \
+            <<'EOF'
+          #!/bin/sh
+
+          DEPS_DIR="${E5186_DEPS_DIR}"
+
+          case " $* " in
+
+            *" --modversion libnfnetlink "*)
+              echo "1.0.2"
+              exit 0
+              ;;
+
+            *" --modversion libmnl "*)
+              echo "1.0.5"
+              exit 0
+              ;;
+
+            *" --exists "*)
+              case "$*" in
+                *libnfnetlink*)
+                  exit 0
+                  ;;
+                *libmnl*)
+                  exit 0
+                  ;;
+              esac
+              ;;
+
+            *" --cflags "*)
+              case "$*" in
+                *libnfnetlink*)
+                  echo "-I${DEPS_DIR}/include/libnfnetlink"
+                  exit 0
+                  ;;
+                *libmnl*)
+                  echo "-I${DEPS_DIR}/include/libmnl"
+                  exit 0
+                  ;;
+              esac
+              ;;
+
+            *" --libs "*)
+              case "$*" in
+                *libnfnetlink*)
+                  echo "-L${DEPS_DIR}/lib -lnfnetlink"
+                  exit 0
+                  ;;
+                *libmnl*)
+                  echo "-L${DEPS_DIR}/lib -lmnl"
+                  exit 0
+                  ;;
+              esac
+              ;;
+
+            *)
+              exec /usr/bin/pkg-config "$@"
+              ;;
+          esac
+
+          exit 1
+          EOF
+
+          chmod 755 \
+            "$GITHUB_WORKSPACE/tools/e5186-pkg-config"
+
+          export E5186_DEPS_DIR="$DEPS_DIR"
+
+          echo ""
+          echo "===== TEST LOCAL PKG-CONFIG ====="
+
+          "$GITHUB_WORKSPACE/tools/e5186-pkg-config" \
+            --modversion libnfnetlink
+
+          "$GITHUB_WORKSPACE/tools/e5186-pkg-config" \
+            --modversion libmnl
+
+          "$GITHUB_WORKSPACE/tools/e5186-pkg-config" \
+            --cflags libnfnetlink
+
+          "$GITHUB_WORKSPACE/tools/e5186-pkg-config" \
+            --libs libnfnetlink
+
+          "$GITHUB_WORKSPACE/tools/e5186-pkg-config" \
+            --cflags libmnl
+
+          "$GITHUB_WORKSPACE/tools/e5186-pkg-config" \
+            --libs libmnl
+
+          # ------------------------------------------------------
+          # libnetfilter_queue THIRD
+          # ------------------------------------------------------
+
+          echo ""
+          echo "===== libnetfilter_queue 1.0.5 ====="
+
           wget -qO- \
             "https://www.netfilter.org/pub/libnetfilter_queue/libnetfilter_queue-1.0.5.tar.bz2" \
             | tar -xj
 
-          echo ""
-          echo "============================================================"
-          echo " BUILD NETFILTER LIBRARIES"
-          echo "============================================================"
+          (
+            cd libnetfilter_queue-1.0.5
 
-          for i in libmnl libnfnetlink libnetfilter_queue
-          do
+            export PKG_CONFIG="$GITHUB_WORKSPACE/tools/e5186-pkg-config"
 
-            echo ""
-            echo "------------------------------------------------------------"
-            echo "BUILDING: $i"
-            echo "------------------------------------------------------------"
+            export E5186_DEPS_DIR="$DEPS_DIR"
 
-            (
-              cd "$i"-*
+            export LIBMNL_CFLAGS="-I$DEPS_DIR/include/libmnl"
+            export LIBMNL_LIBS="-L$DEPS_DIR/lib -lmnl"
 
-              CFLAGS="$OPTIMIZE $CPU -flto=auto" \
-                ./configure \
-                  --prefix= \
-                  --host="$TARGET" \
-                  --enable-static \
-                  --disable-shared \
-                  --disable-dependency-tracking
+            export LIBNFNETLINK_CFLAGS="-I$DEPS_DIR/include/libnfnetlink"
+            export LIBNFNETLINK_LIBS="-L$DEPS_DIR/lib -lnfnetlink"
 
-              make install \
-                -j"$(nproc)" \
-                DESTDIR="$DEPS_DIR"
-            )
+            CFLAGS="$OPTIMIZE $CPU -flto=auto" \
+              ./configure \
+                --prefix= \
+                --host="$TARGET" \
+                --enable-static \
+                --disable-shared \
+                --disable-dependency-tracking
 
-            test -f \
-              "$DEPS_DIR/lib/pkgconfig/$i.pc"
+            make -j"$(nproc)"
 
-            sed -i \
-              "s|^prefix=.*|prefix=$DEPS_DIR|g" \
-              "$DEPS_DIR/lib/pkgconfig/$i.pc"
+            make install \
+              -j"$(nproc)" \
+              DESTDIR="$DEPS_DIR"
+          )
 
-            echo ""
-            echo "===== $i.pc ====="
+          sed -i \
+            "s|^prefix=.*|prefix=$DEPS_DIR|g" \
+            "$DEPS_DIR/lib/pkgconfig/libnetfilter_queue.pc"
 
-            cat \
-              "$DEPS_DIR/lib/pkgconfig/$i.pc"
-
-          done
+          test -f \
+            "$DEPS_DIR/lib/libnetfilter_queue.a"
 
           echo ""
-          echo "============================================================"
-          echo " CHECK PKG-CONFIG"
-          echo "============================================================"
-
-          pkg-config --version
-
-          echo ""
-          echo "--- libmnl ---"
-          pkg-config --modversion libmnl
-
-          echo ""
-          echo "--- libnfnetlink ---"
-          pkg-config --modversion libnfnetlink
-
-          echo ""
-          echo "--- libnetfilter_queue ---"
-          pkg-config --modversion libnetfilter_queue
-
-          echo ""
-          echo "============================================================"
-          echo " CHECK LIBRARY FILES"
-          echo "============================================================"
-
-          test -f "$DEPS_DIR/lib/libmnl.a"
-          test -f "$DEPS_DIR/lib/libnfnetlink.a"
-          test -f "$DEPS_DIR/lib/libnetfilter_queue.a"
+          echo "===== NETFILTER LIBRARIES ====="
 
           ls -lh \
             "$DEPS_DIR/lib/libmnl.a" \
@@ -312,20 +441,18 @@ jobs:
             "$DEPS_DIR/lib/libnetfilter_queue.a"
 
           # ------------------------------------------------------
-          # ZLIB
+          # zlib
           # ------------------------------------------------------
 
           echo ""
-          echo "============================================================"
-          echo " BUILD ZLIB"
-          echo "============================================================"
+          echo "===== zlib ====="
 
-          gh api \
+          TAG=$(gh api \
             repos/madler/zlib/releases/latest \
-            --jq '.tag_name' \
-            | xargs -I{} \
-              wget -qO- \
-              "https://github.com/madler/zlib/archive/refs/tags/{}.tar.gz" \
+            --jq '.tag_name')
+
+          wget -qO- \
+            "https://github.com/madler/zlib/archive/refs/tags/${TAG}.tar.gz" \
             | tar -xz
 
           (
@@ -342,13 +469,11 @@ jobs:
           )
 
           # ------------------------------------------------------
-          # HEADERS
+          # headers
           # ------------------------------------------------------
 
           echo ""
-          echo "============================================================"
-          echo " INSTALL HEADERS"
-          echo "============================================================"
+          echo "===== HEADERS ====="
 
           install \
             -Dm644 \
@@ -356,41 +481,57 @@ jobs:
             /usr/include/x86_64-linux-gnu/sys/queue.h \
             /usr/include/sys/capability.h
 
-          # ------------------------------------------------------
-          # BUILD ZAPRET
-          # ------------------------------------------------------
-
           echo ""
+          echo "============================================================"
+          echo " DEPENDENCIES READY"
+          echo "============================================================"
+
+      # ========================================================
+      # ZAPRET
+      # ========================================================
+
+      - name: Build patched nfqws
+        shell: bash
+        run: |
+          set -eux
+
+          cd "$GITHUB_WORKSPACE/zapret"
+
+          TARGET="armv6-unknown-linux-musleabi"
+          DEPS_DIR="$GITHUB_WORKSPACE/deps"
+          CPU="-mcpu=arm1176jzf-s -mthumb"
+
+          export CC="$TARGET-gcc"
+          export LD="$TARGET-ld"
+          export AR="$TARGET-ar"
+          export NM="$TARGET-nm"
+          export STRIP="$TARGET-strip"
+
+          CFLAGS="-DZAPRET_GH_VER=v72.13-e5186"
+          CFLAGS="$CFLAGS -DZAPRET_GH_HASH=87e058624c72863db53bdaf7fb6f16576dddb6ab"
+          CFLAGS="$CFLAGS -static-libgcc -static"
+          CFLAGS="$CFLAGS $CPU"
+          CFLAGS="$CFLAGS -I$DEPS_DIR/include"
+
+          LDFLAGS="-L$DEPS_DIR/lib"
+
           echo "============================================================"
           echo " BUILD PATCHED ZAPRET"
           echo "============================================================"
 
-          CFLAGS_ZAPRET="-DZAPRET_GH_VER=v72.13-e5186"
-          CFLAGS_ZAPRET="$CFLAGS_ZAPRET -DZAPRET_GH_HASH=87e058624c72863db53bdaf7fb6f16576dddb6ab"
-          CFLAGS_ZAPRET="$CFLAGS_ZAPRET -static-libgcc -static"
-          CFLAGS_ZAPRET="$CFLAGS_ZAPRET $CPU"
-          CFLAGS_ZAPRET="$CFLAGS_ZAPRET -I$DEPS_DIR/include"
+          make -C nfq clean || true
 
-          LDFLAGS_ZAPRET="-L$DEPS_DIR/lib"
-
-          OPTIMIZE="$OPTIMIZE" \
-          CFLAGS="$CFLAGS_ZAPRET" \
-          LDFLAGS="$LDFLAGS_ZAPRET" \
-            make \
-              -C "$GITHUB_WORKSPACE/zapret" \
-              -j"$(nproc)"
-
-          # ------------------------------------------------------
-          # VERIFY
-          # ------------------------------------------------------
+          OPTIMIZE=-Oz \
+          CFLAGS="$CFLAGS" \
+          LDFLAGS="$LDFLAGS" \
+            make -C "$GITHUB_WORKSPACE/zapret" \
+            -j"$(nproc)"
 
           test -f \
             "$GITHUB_WORKSPACE/zapret/binaries/my/nfqws"
 
           echo ""
-          echo "============================================================"
-          echo " BUILT NFQWS"
-          echo "============================================================"
+          echo "===== BUILT NFQWS ====="
 
           file \
             "$GITHUB_WORKSPACE/zapret/binaries/my/nfqws"
@@ -399,15 +540,13 @@ jobs:
             "$GITHUB_WORKSPACE/zapret/binaries/my/nfqws"
 
           echo ""
-          echo "============================================================"
-          echo " SHA256 BEFORE STRIP"
-          echo "============================================================"
+          echo "===== SHA256 BEFORE STRIP ====="
 
           sha256sum \
             "$GITHUB_WORKSPACE/zapret/binaries/my/nfqws"
 
           # ------------------------------------------------------
-          # FINAL COPY
+          # FINAL OUTPUT
           # ------------------------------------------------------
 
           mkdir -p \
@@ -422,7 +561,7 @@ jobs:
 
           echo ""
           echo "============================================================"
-          echo " FINAL NFQWS"
+          echo " FINAL E5186 NFQWS"
           echo "============================================================"
 
           file \
@@ -432,9 +571,7 @@ jobs:
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
 
           echo ""
-          echo "============================================================"
-          echo " FINAL SHA256"
-          echo "============================================================"
+          echo "===== FINAL SHA256 ====="
 
           sha256sum \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
