@@ -1,0 +1,206 @@
+name: E5186 NFQWS ARM test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build patched nfqws for Huawei E5186
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout zapret v72.13
+        uses: actions/checkout@v4
+        with:
+          ref: v72.13
+          path: zapret
+
+      - name: Patch nfqws for old Linux 2.6.36
+        shell: bash
+        run: |
+          set -eux
+
+          cd "$GITHUB_WORKSPACE/zapret"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("nfq/nfqws.c")
+          s = p.read_text()
+
+          old = """DLOG_CONDUP("unbinding existing nf_queue handler for AF_INET (if any)\\n");
+          if (nfq_unbind_pf(*h, AF_INET) < 0) {
+              DLOG_PERROR("nfq_unbind_pf()");
+              goto exiterr;
+          }
+          """
+
+          new = """DLOG_CONDUP("unbinding existing nf_queue handler for AF_INET (if any)\\n");
+          if (nfq_unbind_pf(*h, AF_INET) < 0) {
+              if (errno == EINVAL) {
+                  DLOG("nfq_unbind_pf(): EINVAL, ignoring for old kernel\\n");
+              } else {
+                  DLOG_PERROR("nfq_unbind_pf()");
+                  goto exiterr;
+              }
+          }
+          """
+
+          if old not in s:
+              raise SystemExit("Target code block was not found")
+
+          p.write_text(s.replace(old, new, 1))
+          print("PATCH APPLIED")
+          PY
+
+          grep -n -A12 -B2 'nfq_unbind_pf' nfq/nfqws.c
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -eux
+          sudo dpkg --add-architecture i386 || true
+          sudo apt-get update -qq
+          sudo apt-get install -y libcap-dev
+
+      - name: Install ARMv6 musl toolchain
+        shell: bash
+        run: |
+          set -eux
+
+          mkdir -p "$HOME/tools"
+
+          wget -qO- \
+            "https://github.com/bol-van/musl-cross/releases/download/latest/armv6-unknown-linux-musleabi.tar.xz" \
+            | tar -C "$HOME/tools" -xJ
+
+          echo "$HOME/tools/armv6-unknown-linux-musleabi/bin" >> "$GITHUB_PATH"
+
+      - name: Build static netfilter libraries
+        shell: bash
+        run: |
+          set -eux
+
+          DEPS_DIR="$GITHUB_WORKSPACE/deps"
+          TARGET="armv6-unknown-linux-musleabi"
+          CPU="-mcpu=arm1176jzf-s -mthumb"
+
+          mkdir -p "$DEPS_DIR"
+
+          wget -qO- \
+            "https://www.netfilter.org/pub/libnfnetlink/libnfnetlink-1.0.2.tar.bz2" \
+            | tar -xj
+
+          wget -qO- \
+            "https://www.netfilter.org/pub/libmnl/libmnl-1.0.5.tar.bz2" \
+            | tar -xj
+
+          wget -qO- \
+            "https://www.netfilter.org/pub/libnetfilter_queue/libnetfilter_queue-1.0.5.tar.bz2" \
+            | tar -xj
+
+          for i in libmnl libnfnetlink libnetfilter_queue; do
+            (
+              cd "$i"-*
+
+              CFLAGS="-Oz $CPU -flto=auto" \
+              ./configure \
+                --prefix= \
+                --host="$TARGET" \
+                --enable-static \
+                --disable-shared \
+                --disable-dependency-tracking
+
+              make install -j"$(nproc)" DESTDIR="$DEPS_DIR"
+            )
+
+            sed -i \
+              "s|^prefix=.*|prefix=$DEPS_DIR|g" \
+              "$DEPS_DIR/lib/pkgconfig/$i.pc"
+          done
+
+      - name: Build static zlib
+        shell: bash
+        run: |
+          set -eux
+
+          DEPS_DIR="$GITHUB_WORKSPACE/deps"
+          CPU="-mcpu=arm1176jzf-s -mthumb"
+
+          gh api repos/madler/zlib/releases/latest --jq '.tag_name' \
+            | xargs -I{} wget -qO- \
+              "https://github.com/madler/zlib/archive/refs/tags/{}.tar.gz" \
+            | tar -xz
+
+          (
+            cd zlib-*
+
+            CFLAGS="-Oz $CPU -flto=auto" \
+            ./configure --prefix= --static
+
+            make install -j"$(nproc)" DESTDIR="$DEPS_DIR"
+          )
+
+      - name: Prepare headers
+        shell: bash
+        run: |
+          set -eux
+
+          DEPS_DIR="$GITHUB_WORKSPACE/deps"
+
+          install -Dm644 \
+            /usr/include/x86_64-linux-gnu/sys/queue.h \
+            "$DEPS_DIR/include/sys/queue.h"
+
+          install -Dm644 \
+            /usr/include/sys/capability.h \
+            "$DEPS_DIR/include/sys/capability.h"
+
+      - name: Build patched nfqws
+        shell: bash
+        run: |
+          set -eux
+
+          cd "$GITHUB_WORKSPACE/zapret"
+
+          export TARGET="armv6-unknown-linux-musleabi"
+          export CC="$TARGET-gcc"
+          export LD="$TARGET-ld"
+          export AR="$TARGET-ar"
+          export NM="$TARGET-nm"
+          export STRIP="$TARGET-strip"
+
+          DEPS_DIR="$GITHUB_WORKSPACE/deps"
+          CPU="-mcpu=arm1176jzf-s -mthumb"
+
+          CFLAGS="-DZAPRET_GH_VER=v72.13-e5186"
+          CFLAGS="$CFLAGS -DZAPRET_GH_HASH=${GITHUB_SHA}"
+          CFLAGS="$CFLAGS -static-libgcc -static"
+          CFLAGS="$CFLAGS $CPU"
+          CFLAGS="$CFLAGS -I$DEPS_DIR/include"
+
+          LDFLAGS="-L$DEPS_DIR/lib"
+
+          make -C nfq clean
+          make -C nfq \
+            CFLAGS="$CFLAGS" \
+            LDFLAGS="$LDFLAGS"
+
+          file nfq/nfqws
+          "$TARGET-readelf" -h nfq/nfqws
+          "$TARGET-readelf" -d nfq/nfqws || true
+          "$TARGET-strip" nfq/nfqws
+
+          mkdir -p output
+
+          cp nfq/nfqws output/nfqws-e5186-v72.13
+
+          sha256sum output/nfqws-e5186-v72.13
+          ls -lh output/nfqws-e5186-v72.13
+
+      - name: Upload E5186 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfqws-e5186-v72.13
+          path: zapret/output/nfqws-e5186-v72.13
+          if-no-files-found: error
