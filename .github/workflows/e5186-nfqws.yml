@@ -1,114 +1,302 @@
-      - name: Build patched nfqws
+name: E5186 NFQWS ARM test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build patched nfqws for Huawei E5186
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Download official zapret v72.13 source
+        shell: bash
+        run: |
+          set -eux
+
+          mkdir -p "$GITHUB_WORKSPACE/src"
+
+          wget -qO "$GITHUB_WORKSPACE/zapret-v72.13.tar.gz" \
+            "https://github.com/bol-van/zapret/archive/refs/tags/v72.13.tar.gz"
+
+          tar -xzf \
+            "$GITHUB_WORKSPACE/zapret-v72.13.tar.gz" \
+            -C "$GITHUB_WORKSPACE/src"
+
+          mv \
+            "$GITHUB_WORKSPACE/src/zapret-72.13" \
+            "$GITHUB_WORKSPACE/zapret"
+
+          test -f \
+            "$GITHUB_WORKSPACE/zapret/nfq/nfqws.c"
+
+          echo "SOURCE OK"
+
+      - name: Patch nfqws for Huawei E5186 Linux 2.6.36
         shell: bash
         run: |
           set -eux
 
           cd "$GITHUB_WORKSPACE/zapret"
 
-          TARGET="armv6-unknown-linux-musleabi"
-          DEPS="$GITHUB_WORKSPACE/deps"
-          CPU="-mcpu=arm1176jzf-s -mthumb"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("nfq/nfqws.c")
+          s = p.read_text()
+
+          needle = "nfq_unbind_pf(*h, AF_INET)"
+
+          pos = s.find(needle)
+
+          if pos < 0:
+              raise SystemExit(
+                  "ERROR: nfq_unbind_pf(*h, AF_INET) not found"
+              )
+
+          print("===== NFQWS CODE BEFORE PATCH =====")
+          print(s[max(0, pos-300):pos+650])
+
+          pattern = re.compile(
+              r'''
+              (?P<indent>^[ \t]*)
+              if\s*\(\s*
+              nfq_unbind_pf\(\*h,\s*AF_INET\)
+              \s*<\s*0\s*\)\s*
+              \{
+              \s*DLOG_PERROR\("nfq_unbind_pf\(\)"\)\s*;
+              \s*goto\s+exiterr\s*;
+              \s*\}
+              ''',
+              re.MULTILINE | re.VERBOSE
+          )
+
+          m = pattern.search(s)
+
+          if not m:
+              raise SystemExit(
+                  "ERROR: nfq_unbind_pf error block not found"
+              )
+
+          i = m.group("indent")
+
+          replacement = (
+              f'{i}if (nfq_unbind_pf(*h, AF_INET) < 0) {{\n'
+              f'{i}    if (errno == EINVAL) {{\n'
+              f'{i}        DLOG("nfq_unbind_pf(): EINVAL, ignoring for old kernel\\n");\n'
+              f'{i}    }} else {{\n'
+              f'{i}        DLOG_PERROR("nfq_unbind_pf()");\n'
+              f'{i}        goto exiterr;\n'
+              f'{i}    }}\n'
+              f'{i}}}'
+          )
+
+          p.write_text(
+              s[:m.start()] +
+              replacement +
+              s[m.end():]
+          )
+
+          print("")
+          print("===== PATCH APPLIED =====")
+
+          s2 = p.read_text()
+          pos2 = s2.find(needle)
+
+          print(s2[max(0, pos2-250):pos2+800])
+          PY
+
+      - name: Set up official ARM build environment
+        shell: bash
+        run: |
+          set -eux
+
+          ARCH=arm
+          TOOL=armv6-unknown-linux-musleabi
+
+          sudo apt update -qq
+          sudo apt install -y libcap-dev
+
+          mkdir -p "$HOME/tools"
+
+          URL="https://github.com/bol-van/musl-cross/releases/download/latest/${TOOL}.tar.xz"
+
+          wget -qO- "$URL" \
+            | tar -C "$HOME/tools" -xJ
+
+          test -d \
+            "$HOME/tools/$TOOL/bin"
+
+          echo \
+            "$HOME/tools/$TOOL/bin" \
+            >> "$GITHUB_PATH"
+
+          "$HOME/tools/$TOOL/bin/$TOOL-gcc" \
+            --version
+
+      - name: Official v72.13 ARM build with E5186 patch
+        shell: bash
+        env:
+          ARCH: arm
+          TARGET: armv6-unknown-linux-musleabi
+          CFLAGS_EXTRA: ""
+          LDFLAGS_EXTRA: ""
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+
+          DEPS_DIR="$GITHUB_WORKSPACE/deps"
 
           export CC="$TARGET-gcc"
-          export AR="$TARGET-ar"
           export LD="$TARGET-ld"
+          export AR="$TARGET-ar"
           export NM="$TARGET-nm"
           export STRIP="$TARGET-strip"
 
+          export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig"
+          export STAGING_DIR="$RUNNER_TEMP"
+
+          OPTIMIZE=-Oz
+          CPU="-mcpu=arm1176jzf-s -mthumb"
+
+          mkdir -p \
+            "$DEPS_DIR"
+
           echo "============================================================"
-          echo " PREPARE SYSTEM HEADERS"
+          echo " NETFILTER LIBRARIES"
           echo "============================================================"
 
-          mkdir -p "$DEPS/include/sys"
+          wget -qO- \
+            "https://www.netfilter.org/pub/libnfnetlink/libnfnetlink-1.0.2.tar.bz2" \
+            | tar -xj
 
-          test -f /usr/include/x86_64-linux-gnu/sys/queue.h
-          test -f /usr/include/sys/capability.h
+          wget -qO- \
+            "https://www.netfilter.org/pub/libmnl/libmnl-1.0.5.tar.bz2" \
+            | tar -xj
 
-          cp \
+          wget -qO- \
+            "https://www.netfilter.org/pub/libnetfilter_queue/libnetfilter_queue-1.0.5.tar.bz2" \
+            | tar -xj
+
+          for i in libmnl libnfnetlink libnetfilter_queue
+          do
+            (
+              cd "$i"-*
+
+              CFLAGS="$OPTIMIZE $CPU -flto=auto $CFLAGS" \
+                ./configure \
+                  --prefix= \
+                  --host="$TARGET" \
+                  --enable-static \
+                  --disable-shared \
+                  --disable-dependency-tracking
+
+              make install \
+                -j"$(nproc)" \
+                DESTDIR="$DEPS_DIR"
+            )
+
+            sed -i \
+              "s|^prefix=.*|prefix=$DEPS_DIR|g" \
+              "$DEPS_DIR/lib/pkgconfig/$i.pc"
+          done
+
+          echo "============================================================"
+          echo " ZLIB"
+          echo "============================================================"
+
+          gh api \
+            repos/madler/zlib/releases/latest \
+            --jq '.tag_name' \
+            | xargs -I{} \
+              wget -qO- \
+              "https://github.com/madler/zlib/archive/refs/tags/{}.tar.gz" \
+            | tar -xz
+
+          (
+            cd zlib-*
+
+            CFLAGS="$OPTIMIZE $CPU -flto=auto $CFLAGS" \
+              ./configure \
+                --prefix= \
+                --static
+
+            make install \
+              -j"$(nproc)" \
+              DESTDIR="$DEPS_DIR"
+          )
+
+          echo "============================================================"
+          echo " SYSTEM HEADERS"
+          echo "============================================================"
+
+          install \
+            -Dm644 \
+            -t "$DEPS_DIR/include/sys" \
             /usr/include/x86_64-linux-gnu/sys/queue.h \
-            "$DEPS/include/sys/queue.h"
+            /usr/include/sys/capability.h
 
-          cp \
-            /usr/include/sys/capability.h \
-            "$DEPS/include/sys/capability.h"
+          test -f \
+            "$DEPS_DIR/include/sys/queue.h"
 
-          echo "sys/queue.h:"
-          ls -lh "$DEPS/include/sys/queue.h"
+          test -f \
+            "$DEPS_DIR/include/sys/capability.h"
 
-          echo "sys/capability.h:"
-          ls -lh "$DEPS/include/sys/capability.h"
+          echo "queue.h OK"
+          echo "capability.h OK"
 
-          echo ""
           echo "============================================================"
-          echo " CHECK NETFILTER HEADERS"
+          echo " BUILD ZAPRET"
           echo "============================================================"
 
-          test -f "$DEPS/include/libmnl/libmnl.h"
-          test -f "$DEPS/include/libnfnetlink/libnfnetlink.h"
-          test -f "$DEPS/include/libnetfilter_queue/libnetfilter_queue.h"
+          CFLAGS_ZAPRET="-DZAPRET_GH_VER=v72.13-e5186"
+          CFLAGS_ZAPRET="$CFLAGS_ZAPRET -DZAPRET_GH_HASH=87e058624c72863db53bdaf7fb6f16576dddb6ab"
+          CFLAGS_ZAPRET="$CFLAGS_ZAPRET -static-libgcc"
+          CFLAGS_ZAPRET="$CFLAGS_ZAPRET -static"
+          CFLAGS_ZAPRET="$CFLAGS_ZAPRET $CPU"
+          CFLAGS_ZAPRET="$CFLAGS_ZAPRET -I$DEPS_DIR/include"
 
-          echo "All required headers exist."
+          LDFLAGS_ZAPRET="-L$DEPS_DIR/lib"
 
-          echo ""
-          echo "============================================================"
-          echo " BUILD NFQWS"
-          echo "============================================================"
+          OPTIMIZE="$OPTIMIZE" \
+          CFLAGS="$CFLAGS_ZAPRET" \
+          LDFLAGS="$LDFLAGS_ZAPRET" \
+            make \
+              -C "$GITHUB_WORKSPACE/zapret" \
+              -j"$(nproc)"
 
-          CFLAGS="-Oz"
-          CFLAGS="$CFLAGS $CPU"
-          CFLAGS="$CFLAGS -static"
-          CFLAGS="$CFLAGS -static-libgcc"
-          CFLAGS="$CFLAGS -I$DEPS/include"
+          test -f \
+            "$GITHUB_WORKSPACE/zapret/binaries/my/nfqws"
 
-          CPPFLAGS="-I$DEPS/include"
-
-          LDFLAGS="-L$DEPS/lib"
-
-          echo "CFLAGS=$CFLAGS"
-          echo "CPPFLAGS=$CPPFLAGS"
-          echo "LDFLAGS=$LDFLAGS"
-
-          make -C nfq clean || true
-
-          make -C nfq \
-            CC="$CC" \
-            AR="$AR" \
-            LD="$LD" \
-            CFLAGS="$CFLAGS" \
-            CPPFLAGS="$CPPFLAGS" \
-            LDFLAGS="$LDFLAGS"
-
-          test -f nfq/nfqws
-
-          echo ""
           echo "============================================================"
           echo " BUILT NFQWS"
           echo "============================================================"
 
-          file nfq/nfqws
-          ls -lh nfq/nfqws
+          file \
+            "$GITHUB_WORKSPACE/zapret/binaries/my/nfqws"
 
-          echo ""
-          echo "===== SHA256 ====="
+          ls -lh \
+            "$GITHUB_WORKSPACE/zapret/binaries/my/nfqws"
 
-          sha256sum nfq/nfqws
+          echo "============================================================"
+          echo " SHA256"
+          echo "============================================================"
 
-          echo ""
-          echo "===== CREATE OUTPUT ====="
+          sha256sum \
+            "$GITHUB_WORKSPACE/zapret/binaries/my/nfqws"
 
-          mkdir -p "$GITHUB_WORKSPACE/output"
+          echo "============================================================"
+          echo " COPY OUTPUT"
+          echo "============================================================"
+
+          mkdir -p \
+            "$GITHUB_WORKSPACE/output"
 
           cp \
-            nfq/nfqws \
+            "$GITHUB_WORKSPACE/zapret/binaries/my/nfqws" \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
-
-          "$STRIP" \
-            "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
-
-          echo ""
-          echo "============================================================"
-          echo " FINAL BINARY"
-          echo "============================================================"
 
           file \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
@@ -116,8 +304,12 @@
           ls -lh \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
 
-          echo ""
-          echo "===== FINAL SHA256 ====="
-
           sha256sum \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
+
+      - name: Upload E5186 nfqws
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfqws-e5186-v72.13
+          path: output/nfqws-e5186-v72.13
+          if-no-files-found: error
