@@ -23,15 +23,17 @@ jobs:
           tar -xzf "$GITHUB_WORKSPACE/zapret-v72.13.tar.gz" \
             -C "$GITHUB_WORKSPACE/src"
 
+          test -d "$GITHUB_WORKSPACE/src/zapret-72.13"
+
           mv "$GITHUB_WORKSPACE/src/zapret-72.13" \
              "$GITHUB_WORKSPACE/zapret"
 
           test -f "$GITHUB_WORKSPACE/zapret/nfq/nfqws.c"
 
-          echo "Official v72.13 source downloaded"
-          cd "$GITHUB_WORKSPACE/zapret"
-          git_hash="$(grep -R "87e0586" -n . 2>/dev/null | head -1 || true)"
-          echo "$git_hash"
+          echo "===== SOURCE ====="
+          ls -la "$GITHUB_WORKSPACE/zapret"
+          echo "===== NFQWS SOURCE ====="
+          ls -lh "$GITHUB_WORKSPACE/zapret/nfq/nfqws.c"
 
       - name: Patch nfqws for old Linux 2.6.36
         shell: bash
@@ -68,14 +70,13 @@ jobs:
               raise SystemExit("TARGET BLOCK NOT FOUND")
 
           p.write_text(s.replace(old, new, 1))
-
           print("PATCH APPLIED")
           PY
 
-          echo "===== PATCHED CODE ====="
+          echo "===== PATCH CHECK ====="
           grep -n -A12 -B2 'nfq_unbind_pf' nfq/nfqws.c
 
-      - name: Install build tools
+      - name: Install ARM build tools
         shell: bash
         run: |
           set -eux
@@ -83,32 +84,44 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y libcap-dev
 
-      - name: Install official ARM toolchain
-        shell: bash
-        run: |
-          set -eux
-
           mkdir -p "$HOME/tools"
 
           wget -qO- \
             "https://github.com/bol-van/musl-cross/releases/download/latest/armv6-unknown-linux-musleabi.tar.xz" \
             | tar -C "$HOME/tools" -xJ
 
+          test -x \
+            "$HOME/tools/armv6-unknown-linux-musleabi/bin/armv6-unknown-linux-musleabi-gcc"
+
           echo "$HOME/tools/armv6-unknown-linux-musleabi/bin" >> "$GITHUB_PATH"
 
           "$HOME/tools/armv6-unknown-linux-musleabi/bin/armv6-unknown-linux-musleabi-gcc" \
             --version
 
-      - name: Build static netfilter libraries
+      - name: Build dependencies and zapret
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
 
+          ARCH=arm
+          TARGET=armv6-unknown-linux-musleabi
           DEPS_DIR="$GITHUB_WORKSPACE/deps"
-          TARGET="armv6-unknown-linux-musleabi"
           CPU="-mcpu=arm1176jzf-s -mthumb"
+          OPTIMIZE="-Oz"
+
+          export CC="$TARGET-gcc"
+          export LD="$TARGET-ld"
+          export AR="$TARGET-ar"
+          export NM="$TARGET-nm"
+          export STRIP="$TARGET-strip"
+          export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig"
+          export STAGING_DIR="$RUNNER_TEMP"
 
           mkdir -p "$DEPS_DIR"
+
+          echo "===== NETFILTER LIBS ====="
 
           wget -qO- \
             "https://www.netfilter.org/pub/libnfnetlink/libnfnetlink-1.0.2.tar.bz2" \
@@ -126,7 +139,7 @@ jobs:
             (
               cd "$i"-*
 
-              CFLAGS="-Oz $CPU -flto=auto" \
+              CFLAGS="$OPTIMIZE $CPU -flto=auto" \
               ./configure \
                 --prefix= \
                 --host="$TARGET" \
@@ -142,14 +155,7 @@ jobs:
               "$DEPS_DIR/lib/pkgconfig/$i.pc"
           done
 
-      - name: Build static zlib
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -eux
-
-          DEPS_DIR="$GITHUB_WORKSPACE/deps"
+          echo "===== ZLIB ====="
 
           TAG=$(gh api repos/madler/zlib/releases/latest --jq '.tag_name')
 
@@ -157,74 +163,64 @@ jobs:
             "https://github.com/madler/zlib/archive/refs/tags/${TAG}.tar.gz" \
             | tar -xz
 
-          cd zlib-*
+          (
+            cd zlib-*
 
-          CFLAGS="-Oz -mcpu=arm1176jzf-s -mthumb -flto=auto" \
-            ./configure --prefix= --static
+            CFLAGS="$OPTIMIZE $CPU -flto=auto" \
+            ./configure \
+              --prefix= \
+              --static
 
-          make install -j"$(nproc)" DESTDIR="$DEPS_DIR"
+            make install -j"$(nproc)" DESTDIR="$DEPS_DIR"
+          )
 
-      - name: Prepare headers
-        shell: bash
-        run: |
-          set -eux
-
-          DEPS_DIR="$GITHUB_WORKSPACE/deps"
+          echo "===== HEADERS ====="
 
           install -Dm644 \
             -t "$DEPS_DIR/include/sys" \
             /usr/include/x86_64-linux-gnu/sys/queue.h \
             /usr/include/sys/capability.h
 
-      - name: Build patched nfqws
-        shell: bash
-        run: |
-          set -eux
+          echo "===== BUILD ZAPRET ====="
 
           cd "$GITHUB_WORKSPACE/zapret"
 
-          TARGET="armv6-unknown-linux-musleabi"
-          DEPS_DIR="$GITHUB_WORKSPACE/deps"
-          CPU="-mcpu=arm1176jzf-s -mthumb"
-
-          export CC="$TARGET-gcc"
-          export LD="$TARGET-ld"
-          export AR="$TARGET-ar"
-          export NM="$TARGET-nm"
-          export STRIP="$TARGET-strip"
-          export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig"
-
-          make clean || true
-
           CFLAGS="-DZAPRET_GH_VER=v72.13-e5186"
+          CFLAGS="$CFLAGS -DZAPRET_GH_HASH=87e058624c72863db53bdaf7fb6f16576dddb6ab"
           CFLAGS="$CFLAGS -static-libgcc -static"
           CFLAGS="$CFLAGS $CPU"
           CFLAGS="$CFLAGS -I$DEPS_DIR/include"
 
           LDFLAGS="-L$DEPS_DIR/lib"
 
-          make -C nfq -j"$(nproc)" \
-            CFLAGS="$CFLAGS" \
-            LDFLAGS="$LDFLAGS"
+          OPTIMIZE="$OPTIMIZE" \
+          CFLAGS="$CFLAGS" \
+          LDFLAGS="$LDFLAGS" \
+          make -C zapret -j"$(nproc)"
 
-          "$TARGET-strip" nfq/nfqws
+          test -f binaries/my/nfqws
 
-          file nfq/nfqws
+          echo "===== BUILT NFQWS ====="
+          file binaries/my/nfqws
+          ls -lh binaries/my/nfqws
 
-          echo "===== ELF HEADER ====="
-          "$TARGET-readelf" -h nfq/nfqws
+          echo "===== SHA256 ====="
+          sha256sum binaries/my/nfqws
 
           mkdir -p "$GITHUB_WORKSPACE/output"
 
-          cp nfq/nfqws \
-             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
+          cp binaries/my/nfqws \
+            "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
 
+          "$TARGET-strip" \
+            "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
+
+          echo "===== FINAL FILE ====="
+          file "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
           ls -lh "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
-
-          echo "===== SHA256 ====="
           sha256sum "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
 
-      - name: Upload patched binary
+      - name: Upload patched nfqws
         uses: actions/upload-artifact@v4
         with:
           name: nfqws-e5186-v72.13
