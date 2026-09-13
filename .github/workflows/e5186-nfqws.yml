@@ -10,11 +10,11 @@ jobs:
 
     steps:
 
-      # ========================================================
-      # DOWNLOAD OFFICIAL SOURCE
-      # ========================================================
+      # ============================================================
+      # SOURCE
+      # ============================================================
 
-      - name: Download official zapret v72.13
+      - name: Download official zapret v72.13 source
         shell: bash
         run: |
           set -eux
@@ -40,11 +40,11 @@ jobs:
 
           echo "SOURCE OK"
 
-      # ========================================================
+      # ============================================================
       # PATCH
-      # ========================================================
+      # ============================================================
 
-      - name: Patch nfqws for Huawei E5186
+      - name: Patch nfqws for Huawei E5186 Linux 2.6.36
         shell: bash
         run: |
           set -eux
@@ -76,9 +76,11 @@ jobs:
               \s*\)
               \s*\{
               \s*
-              DLOG_PERROR\("nfq_unbind_pf\(\)"\);
+              DLOG_PERROR\("nfq_unbind_pf\(\)"\)
+              \s*;
               \s*
-              goto\s+exiterr;
+              goto\s+exiterr
+              \s*;
               \s*
               \}
               ''',
@@ -105,41 +107,39 @@ jobs:
               f'{i}}}'
           )
 
-          p.write_text(
-              s[:m.start()] +
-              replacement +
-              s[m.end():]
-          )
+          s2 = s[:m.start()] + replacement + s[m.end():]
+          p.write_text(s2)
 
           print("PATCH APPLIED")
 
-          s2 = p.read_text()
           pos2 = s2.find(needle)
 
+          print("===== PATCHED CODE =====")
           print(
               s2[
                   max(0, pos2 - 250):
-                  min(len(s2), pos2 + 850)
+                  min(len(s2), pos2 + 900)
               ]
           )
           PY
 
-      # ========================================================
+      # ============================================================
       # TOOLCHAIN
-      # ========================================================
+      # ============================================================
 
-      - name: Install ARM toolchain
+      - name: Install official ARM toolchain
         shell: bash
         run: |
           set -eux
 
           sudo apt-get update -qq
+
           sudo apt-get install -y \
-            libcap-dev \
             wget \
             tar \
             xz-utils \
-            bzip2
+            bzip2 \
+            libcap-dev
 
           TOOL="armv6-unknown-linux-musleabi"
 
@@ -151,19 +151,19 @@ jobs:
               -C "$HOME/tools" \
               -xJ
 
-          test -x \
-            "$HOME/tools/$TOOL/bin/$TOOL-gcc"
+          TOOLBIN="$HOME/tools/$TOOL/bin"
 
-          echo \
-            "$HOME/tools/$TOOL/bin" \
-            >> "$GITHUB_PATH"
+          test -x "$TOOLBIN/$TOOL-gcc"
 
-          "$HOME/tools/$TOOL/bin/$TOOL-gcc" \
-            --version
+          echo "$TOOLBIN" >> "$GITHUB_PATH"
 
-      # ========================================================
+          echo "===== GCC ====="
+
+          "$TOOLBIN/$TOOL-gcc" --version
+
+      # ============================================================
       # DEPENDENCIES
-      # ========================================================
+      # ============================================================
 
       - name: Build ARM dependencies
         shell: bash
@@ -171,6 +171,7 @@ jobs:
           set -eux
 
           DEPS="$GITHUB_WORKSPACE/deps"
+
           TARGET="armv6-unknown-linux-musleabi"
           CPU="-mcpu=arm1176jzf-s -mthumb"
           OPT="-Oz"
@@ -181,71 +182,75 @@ jobs:
 
           cd "$GITHUB_WORKSPACE"
 
-          echo "============================================================"
-          echo " DOWNLOAD NETFILTER SOURCES"
-          echo "============================================================"
+          # --------------------------------------------------------
+          # libmnl
+          # --------------------------------------------------------
+
+          echo "===== libmnl ====="
 
           wget -qO- \
             "https://www.netfilter.org/pub/libmnl/libmnl-1.0.5.tar.bz2" \
             | tar -xj
 
-          wget -qO- \
-            "https://www.netfilter.org/pub/libnfnetlink/libnfnetlink-1.0.2.tar.bz2" \
-            | tar -xj
-
-          wget -qO- \
-            "https://www.netfilter.org/pub/libnetfilter_queue/libnetfilter_queue-1.0.5.tar.bz2" \
-            | tar -xj
-
-          echo ""
-          echo "============================================================"
-          echo " BUILD libmnl"
-          echo "============================================================"
-
           (
             cd libmnl-1.0.5
 
             CC="$TARGET-gcc" \
+            AR="$TARGET-ar" \
             CFLAGS="$OPT $CPU" \
               ./configure \
                 --host="$TARGET" \
                 --prefix="$DEPS" \
                 --enable-static \
-                --disable-shared
+                --disable-shared \
+                --disable-dependency-tracking
 
             make -j"$(nproc)"
             make install
           )
 
-          echo ""
-          echo "============================================================"
-          echo " BUILD libnfnetlink"
-          echo "============================================================"
+          # --------------------------------------------------------
+          # libnfnetlink
+          # --------------------------------------------------------
+
+          echo "===== libnfnetlink ====="
+
+          wget -qO- \
+            "https://www.netfilter.org/pub/libnfnetlink/libnfnetlink-1.0.2.tar.bz2" \
+            | tar -xj
 
           (
             cd libnfnetlink-1.0.2
 
             CC="$TARGET-gcc" \
+            AR="$TARGET-ar" \
             CFLAGS="$OPT $CPU" \
               ./configure \
                 --host="$TARGET" \
                 --prefix="$DEPS" \
                 --enable-static \
-                --disable-shared
+                --disable-shared \
+                --disable-dependency-tracking
 
             make -j"$(nproc)"
             make install
           )
 
-          echo ""
-          echo "============================================================"
-          echo " BUILD libnetfilter_queue"
-          echo "============================================================"
+          # --------------------------------------------------------
+          # libnetfilter_queue
+          # --------------------------------------------------------
+
+          echo "===== libnetfilter_queue ====="
+
+          wget -qO- \
+            "https://www.netfilter.org/pub/libnetfilter_queue/libnetfilter_queue-1.0.5.tar.bz2" \
+            | tar -xj
 
           (
             cd libnetfilter_queue-1.0.5
 
             CC="$TARGET-gcc" \
+            AR="$TARGET-ar" \
             CPPFLAGS="-I$DEPS/include" \
             CFLAGS="$OPT $CPU -I$DEPS/include" \
             LDFLAGS="-L$DEPS/lib" \
@@ -257,45 +262,38 @@ jobs:
                 --host="$TARGET" \
                 --prefix="$DEPS" \
                 --enable-static \
-                --disable-shared
+                --disable-shared \
+                --disable-dependency-tracking
 
             make -j"$(nproc)"
             make install
           )
 
-          echo ""
-          echo "============================================================"
-          echo " DOWNLOAD REQUIRED SYSTEM HEADERS"
-          echo "============================================================"
+          # --------------------------------------------------------
+          # SYSTEM HEADERS
+          # --------------------------------------------------------
+          #
+          # Не зависим от того, есть ли они в конкретном Ubuntu
+          # runner в /usr/include.
+          #
+
+          echo "===== queue.h ====="
 
           wget -qO \
             "$DEPS/include/sys/queue.h" \
             "https://git.alpinelinux.org/aports/plain/main/bsd-compat-headers/queue.h"
 
+          echo "===== capability.h ====="
+
           wget -qO \
             "$DEPS/include/sys/capability.h" \
             "https://git.kernel.org/pub/scm/libs/libcap/libcap.git/plain/libcap/include/sys/capability.h"
 
-          test -s \
-            "$DEPS/include/sys/queue.h"
+          # --------------------------------------------------------
+          # zlib
+          # --------------------------------------------------------
 
-          test -s \
-            "$DEPS/include/sys/capability.h"
-
-          echo ""
-          echo "queue.h:"
-          ls -lh \
-            "$DEPS/include/sys/queue.h"
-
-          echo ""
-          echo "capability.h:"
-          ls -lh \
-            "$DEPS/include/sys/capability.h"
-
-          echo ""
-          echo "============================================================"
-          echo " BUILD zlib"
-          echo "============================================================"
+          echo "===== zlib ====="
 
           wget -qO- \
             "https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz" \
@@ -305,6 +303,7 @@ jobs:
             cd zlib-1.3.1
 
             CC="$TARGET-gcc" \
+            AR="$TARGET-ar" \
             CFLAGS="$OPT $CPU" \
               ./configure \
                 --prefix="$DEPS" \
@@ -314,15 +313,31 @@ jobs:
             make install
           )
 
-          echo ""
+          # --------------------------------------------------------
+          # VERIFY
+          # --------------------------------------------------------
+
           echo "============================================================"
-          echo " VERIFY ALL LIBRARIES"
+          echo " VERIFY DEPENDENCIES"
           echo "============================================================"
 
-          test -f "$DEPS/lib/libmnl.a"
-          test -f "$DEPS/lib/libnfnetlink.a"
-          test -f "$DEPS/lib/libnetfilter_queue.a"
-          test -f "$DEPS/lib/libz.a"
+          test -s "$DEPS/include/sys/queue.h"
+          test -s "$DEPS/include/sys/capability.h"
+
+          test -s "$DEPS/include/libmnl/libmnl.h"
+          test -s "$DEPS/include/libnfnetlink/libnfnetlink.h"
+          test -s "$DEPS/include/libnetfilter_queue/libnetfilter_queue.h"
+
+          test -s "$DEPS/lib/libmnl.a"
+          test -s "$DEPS/lib/libnfnetlink.a"
+          test -s "$DEPS/lib/libnetfilter_queue.a"
+          test -s "$DEPS/lib/libz.a"
+
+          echo "queue.h:"
+          ls -lh "$DEPS/include/sys/queue.h"
+
+          echo "capability.h:"
+          ls -lh "$DEPS/include/sys/capability.h"
 
           echo "libmnl:"
           ls -lh "$DEPS/lib/libmnl.a"
@@ -336,31 +351,12 @@ jobs:
           echo "zlib:"
           ls -lh "$DEPS/lib/libz.a"
 
-      # ========================================================
+          echo "ALL DEPENDENCIES OK"
+
+      # ============================================================
       # BUILD NFQWS
-      # ========================================================
-      - name: Install required system headers
-        shell: bash
-        run: |
-          set -eux
+      # ============================================================
 
-          DEPS="$GITHUB_WORKSPACE/deps"
-
-          mkdir -p "$DEPS/include/sys"
-
-          install -Dm644 \
-            /usr/include/x86_64-linux-gnu/sys/queue.h \
-            "$DEPS/include/sys/queue.h"
-
-          install -Dm644 \
-            /usr/include/sys/capability.h \
-            "$DEPS/include/sys/capability.h"
-
-          test -f "$DEPS/include/sys/queue.h"
-          test -f "$DEPS/include/sys/capability.h"
-
-          echo "queue.h OK"
-          echo "capability.h OK"
       - name: Build patched nfqws
         shell: bash
         run: |
@@ -373,7 +369,7 @@ jobs:
           CPU="-mcpu=arm1176jzf-s -mthumb"
 
           echo "============================================================"
-          echo " VERIFY REQUIRED HEADERS"
+          echo " VERIFY HEADERS"
           echo "============================================================"
 
           test -f \
@@ -391,12 +387,13 @@ jobs:
           test -f \
             "$DEPS/include/libnetfilter_queue/libnetfilter_queue.h"
 
-          echo "ALL HEADERS EXIST"
+          echo "ALL HEADERS FOUND"
 
-          echo ""
           echo "============================================================"
           echo " BUILD NFQWS"
           echo "============================================================"
+
+          mkdir -p "$GITHUB_WORKSPACE/output"
 
           make -C nfq clean || true
 
@@ -405,58 +402,49 @@ jobs:
             AR="$TARGET-ar" \
             LD="$TARGET-ld" \
             NM="$TARGET-nm" \
-            CFLAGS="-DZAPRET_GH_VER=v72.13-e5186 -static-libgcc -static $CPU -I$DEPS/include" \
+            CFLAGS="-DZAPRET_GH_VER=v72.13-e5186 -DZAPRET_GH_HASH=87e058624c72863db53bdaf7fb6f16576dddb6ab -static-libgcc -static $CPU -I$DEPS/include" \
             LDFLAGS="-L$DEPS/lib"
 
           test -f \
-            nfq/nfqws
+            "$GITHUB_WORKSPACE/zapret/nfq/nfqws"
 
-          echo ""
           echo "============================================================"
           echo " BUILT NFQWS"
           echo "============================================================"
 
-          file nfq/nfqws
+          file \
+            "$GITHUB_WORKSPACE/zapret/nfq/nfqws"
 
           ls -lh \
-            nfq/nfqws
+            "$GITHUB_WORKSPACE/zapret/nfq/nfqws"
 
-          echo ""
-          echo "SHA256:"
+          echo "===== SHA256 ====="
+
           sha256sum \
-            nfq/nfqws
-
-          echo ""
-          echo "============================================================"
-          echo " CREATE OUTPUT"
-          echo "============================================================"
-
-          mkdir -p \
-            "$GITHUB_WORKSPACE/output"
+            "$GITHUB_WORKSPACE/zapret/nfq/nfqws"
 
           cp \
-            nfq/nfqws \
+            "$GITHUB_WORKSPACE/zapret/nfq/nfqws" \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
 
-          echo ""
-          echo "FINAL FILE:"
+          echo "============================================================"
+          echo " FINAL BINARY"
+          echo "============================================================"
+
+          file \
+            "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
+
           ls -lh \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
 
-          echo ""
-          echo "FINAL SHA256:"
+          echo "===== FINAL SHA256 ====="
+
           sha256sum \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
 
-          echo ""
-          echo "ELF HEADER:"
-          "$TARGET-readelf" \
-            -h \
-            "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
-
-      # ========================================================
-      # UPLOAD
-      # ========================================================
+      # ============================================================
+      # ARTIFACT
+      # ============================================================
 
       - name: Upload patched nfqws
         uses: actions/upload-artifact@v4
