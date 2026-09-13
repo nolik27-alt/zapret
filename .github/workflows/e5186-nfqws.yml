@@ -1,175 +1,3 @@
-name: E5186 NFQWS ARM test
-
-on:
-  workflow_dispatch:
-
-jobs:
-  build:
-    name: Build patched nfqws for Huawei E5186
-    runs-on: ubuntu-latest
-
-    steps:
-
-      - name: Download official zapret v72.13 source
-        shell: bash
-        run: |
-          set -eux
-
-          mkdir -p "$GITHUB_WORKSPACE/src"
-
-          wget -qO "$GITHUB_WORKSPACE/zapret-v72.13.tar.gz" \
-            "https://github.com/bol-van/zapret/archive/refs/tags/v72.13.tar.gz"
-
-          tar -xzf \
-            "$GITHUB_WORKSPACE/zapret-v72.13.tar.gz" \
-            -C "$GITHUB_WORKSPACE/src"
-
-          mv \
-            "$GITHUB_WORKSPACE/src/zapret-72.13" \
-            "$GITHUB_WORKSPACE/zapret"
-
-          test -f \
-            "$GITHUB_WORKSPACE/zapret/nfq/nfqws.c"
-
-      - name: Patch nfqws for old Linux 2.6.36
-        shell: bash
-        run: |
-          set -eux
-
-          cd "$GITHUB_WORKSPACE/zapret"
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          p = Path("nfq/nfqws.c")
-          s = p.read_text()
-
-          pattern = re.compile(
-              r'(?P<indent>[ \t]*)'
-              r'if\s*\(\s*nfq_unbind_pf\(\*h,\s*AF_INET\)\s*<\s*0\s*\)\s*\{'
-              r'\s*DLOG_PERROR\("nfq_unbind_pf\(\)"\);'
-              r'\s*goto\s+exiterr;'
-              r'\s*\}',
-              re.MULTILINE
-          )
-
-          m = pattern.search(s)
-
-          if not m:
-              raise SystemExit("nfq_unbind_pf block not found")
-
-          i = m.group("indent")
-
-          replacement = (
-              f'{i}if (nfq_unbind_pf(*h, AF_INET) < 0) {{\n'
-              f'{i}    if (errno == EINVAL) {{\n'
-              f'{i}        DLOG("nfq_unbind_pf(): EINVAL, ignoring for old kernel\\n");\n'
-              f'{i}    }} else {{\n'
-              f'{i}        DLOG_PERROR("nfq_unbind_pf()");\n'
-              f'{i}        goto exiterr;\n'
-              f'{i}    }}\n'
-              f'{i}}}'
-          )
-
-          p.write_text(
-              s[:m.start()] + replacement + s[m.end():]
-          )
-
-          print("PATCH APPLIED")
-          PY
-
-      - name: Install ARM toolchain
-        shell: bash
-        run: |
-          set -eux
-
-          sudo apt-get update -qq
-          sudo apt-get install -y libcap-dev
-
-          mkdir -p "$HOME/tools"
-
-          wget -qO- \
-            "https://github.com/bol-van/musl-cross/releases/download/latest/armv6-unknown-linux-musleabi.tar.xz" \
-            | tar -C "$HOME/tools" -xJ
-
-          echo \
-            "$HOME/tools/armv6-unknown-linux-musleabi/bin" \
-            >> "$GITHUB_PATH"
-
-      - name: Build dependencies
-        shell: bash
-        run: |
-          set -eux
-
-          DEPS="$GITHUB_WORKSPACE/deps"
-          TARGET="armv6-unknown-linux-musleabi"
-          CPU="-mcpu=arm1176jzf-s -mthumb"
-
-          mkdir -p "$DEPS/include" "$DEPS/lib"
-
-          cd "$GITHUB_WORKSPACE"
-
-          wget -qO- \
-            "https://www.netfilter.org/pub/libmnl/libmnl-1.0.5.tar.bz2" \
-            | tar -xj
-
-          wget -qO- \
-            "https://www.netfilter.org/pub/libnfnetlink/libnfnetlink-1.0.2.tar.bz2" \
-            | tar -xj
-
-          wget -qO- \
-            "https://www.netfilter.org/pub/libnetfilter_queue/libnetfilter_queue-1.0.5.tar.bz2" \
-            | tar -xj
-
-          (
-            cd libmnl-1.0.5
-
-            CC="$TARGET-gcc" \
-            CFLAGS="-Oz $CPU" \
-              ./configure \
-                --host="$TARGET" \
-                --prefix="$DEPS"
-
-            make -j"$(nproc)"
-            make install
-          )
-
-          (
-            cd libnfnetlink-1.0.2
-
-            CC="$TARGET-gcc" \
-            CFLAGS="-Oz $CPU" \
-              ./configure \
-                --host="$TARGET" \
-                --prefix="$DEPS"
-
-            make -j"$(nproc)"
-            make install
-          )
-
-          (
-            cd libnetfilter_queue-1.0.5
-
-            CC="$TARGET-gcc" \
-            CFLAGS="-Oz $CPU -I$DEPS/include" \
-            LDFLAGS="-L$DEPS/lib" \
-            LIBNFNETLINK_CFLAGS="-I$DEPS/include" \
-            LIBNFNETLINK_LIBS="-L$DEPS/lib -lnfnetlink" \
-            LIBMNL_CFLAGS="-I$DEPS/include" \
-            LIBMNL_LIBS="-L$DEPS/lib -lmnl" \
-              ./configure \
-                --host="$TARGET" \
-                --prefix="$DEPS" \
-                --enable-static \
-                --disable-shared
-
-            make -j"$(nproc)"
-            make install
-          )
-
-          echo "DEPENDENCIES BUILT"
-
       - name: Build patched nfqws
         shell: bash
         run: |
@@ -184,20 +12,89 @@ jobs:
           export CC="$TARGET-gcc"
           export AR="$TARGET-ar"
           export LD="$TARGET-ld"
+          export NM="$TARGET-nm"
           export STRIP="$TARGET-strip"
 
-          CFLAGS="-Oz -static -static-libgcc $CPU -I$DEPS/include"
+          echo "============================================================"
+          echo " PREPARE SYSTEM HEADERS"
+          echo "============================================================"
+
+          mkdir -p "$DEPS/include/sys"
+
+          test -f /usr/include/x86_64-linux-gnu/sys/queue.h
+          test -f /usr/include/sys/capability.h
+
+          cp \
+            /usr/include/x86_64-linux-gnu/sys/queue.h \
+            "$DEPS/include/sys/queue.h"
+
+          cp \
+            /usr/include/sys/capability.h \
+            "$DEPS/include/sys/capability.h"
+
+          echo "sys/queue.h:"
+          ls -lh "$DEPS/include/sys/queue.h"
+
+          echo "sys/capability.h:"
+          ls -lh "$DEPS/include/sys/capability.h"
+
+          echo ""
+          echo "============================================================"
+          echo " CHECK NETFILTER HEADERS"
+          echo "============================================================"
+
+          test -f "$DEPS/include/libmnl/libmnl.h"
+          test -f "$DEPS/include/libnfnetlink/libnfnetlink.h"
+          test -f "$DEPS/include/libnetfilter_queue/libnetfilter_queue.h"
+
+          echo "All required headers exist."
+
+          echo ""
+          echo "============================================================"
+          echo " BUILD NFQWS"
+          echo "============================================================"
+
+          CFLAGS="-Oz"
+          CFLAGS="$CFLAGS $CPU"
+          CFLAGS="$CFLAGS -static"
+          CFLAGS="$CFLAGS -static-libgcc"
+          CFLAGS="$CFLAGS -I$DEPS/include"
+
+          CPPFLAGS="-I$DEPS/include"
+
           LDFLAGS="-L$DEPS/lib"
+
+          echo "CFLAGS=$CFLAGS"
+          echo "CPPFLAGS=$CPPFLAGS"
+          echo "LDFLAGS=$LDFLAGS"
 
           make -C nfq clean || true
 
           make -C nfq \
             CC="$CC" \
             AR="$AR" \
+            LD="$LD" \
             CFLAGS="$CFLAGS" \
+            CPPFLAGS="$CPPFLAGS" \
             LDFLAGS="$LDFLAGS"
 
           test -f nfq/nfqws
+
+          echo ""
+          echo "============================================================"
+          echo " BUILT NFQWS"
+          echo "============================================================"
+
+          file nfq/nfqws
+          ls -lh nfq/nfqws
+
+          echo ""
+          echo "===== SHA256 ====="
+
+          sha256sum nfq/nfqws
+
+          echo ""
+          echo "===== CREATE OUTPUT ====="
 
           mkdir -p "$GITHUB_WORKSPACE/output"
 
@@ -208,7 +105,10 @@ jobs:
           "$STRIP" \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
 
-          echo "===== FINAL BINARY ====="
+          echo ""
+          echo "============================================================"
+          echo " FINAL BINARY"
+          echo "============================================================"
 
           file \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
@@ -216,14 +116,8 @@ jobs:
           ls -lh \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
 
-          echo "===== SHA256 ====="
+          echo ""
+          echo "===== FINAL SHA256 ====="
 
           sha256sum \
             "$GITHUB_WORKSPACE/output/nfqws-e5186-v72.13"
-
-      - name: Upload patched nfqws
-        uses: actions/upload-artifact@v4
-        with:
-          name: nfqws-e5186-v72.13
-          path: output/nfqws-e5186-v72.13
-          if-no-files-found: error
